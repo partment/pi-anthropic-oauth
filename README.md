@@ -47,6 +47,25 @@ pi update npm:pi-anthropic-oauth
 > [!NOTE]
 > Anthropic auth changes are closely monitored for quick compatibility updates.
 
+## Fast Mode
+
+Run `/fast` to toggle Fast Mode, or use `/fast on` / `/fast off`. It defaults to off and is kept in memory only; restarting Pi or running `/reload` resets it.
+
+Fast Mode only applies to the `anthropic` provider with these [officially supported models](https://platform.claude.com/docs/en/build-with-claude/fast-mode#supported-models):
+
+- `claude-opus-5-5`
+- `claude-opus-5`
+- `claude-opus-4-8`
+
+Switching to another model leaves it at standard speed. Switching back to a supported model reuses the toggle. The footer shows `Fast Mode` when it applies to the selected model. The command does not switch models.
+
+Both regular and Fast Mode requests use `/v1/messages?beta=true`, matching Claude Code's request path.
+
+Enabled requests include `speed: "fast"` and the `fast-mode-2026-02-01` beta header, alongside the existing OAuth headers. Disabled or unsupported requests omit both Fast Mode additions. Thinking settings are unchanged.
+
+> [!WARNING]
+> Fast Mode uses premium pricing. Pro/Max subscriptions require usage credits; Fast Mode is not covered by included subscription usage. Pi's cost estimate still uses the model's standard rates. The API decides account access and capacity; this extension does not add Claude Code's availability checks or automatic fallback to standard speed. See [Claude Code Fast Mode](https://code.claude.com/docs/en/fast-mode).
+
 ## Claude Code version override
 
 Anthropic gates new models on the Claude Code client version (error `claude_code_version_too_old`). The version is sent in both the OAuth user agent and the billing header of the system prompt. Override it without reinstalling:

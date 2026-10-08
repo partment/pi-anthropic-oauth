@@ -48,6 +48,12 @@ const EFFORT_BY_REASONING: Record<string, string> = {
   max: "max",
 };
 
+// https://platform.claude.com/docs/en/build-with-claude/fast-mode#supported-models
+export function supportsFastMode(model?: Model<Api>): boolean {
+  return model?.provider === "anthropic" &&
+    ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"].includes(model.id);
+}
+
 export function usesAdaptiveThinking(model: Model<Api>): boolean {
   const forced = (
     model.compat as { forceAdaptiveThinking?: boolean } | undefined
@@ -128,6 +134,7 @@ function headersToRecord(headers: Headers): Record<string, string> {
 function makeDefaultHeaders(
   isOAuth: boolean,
   options?: SimpleStreamOptions,
+  fastMode = false,
 ): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/json",
@@ -151,12 +158,24 @@ function makeDefaultHeaders(
       ) {
         continue;
       }
+      // Keep required betas when adding caller-supplied Fast Mode headers.
+      if (fastMode && normalizedKey === "anthropic-beta") {
+        if (value) headers["anthropic-beta"] += `,${value}`;
+        continue;
+      }
       const existingKey = Object.keys(headers).find(
         (header) => header.toLowerCase() === normalizedKey,
       );
       if (existingKey) delete headers[existingKey];
       if (value !== null) headers[key] = value;
     }
+  }
+
+  if (fastMode) {
+    headers["anthropic-beta"] = [...new Set([
+      ...headers["anthropic-beta"].split(",").map((beta) => beta.trim()).filter(Boolean),
+      "fast-mode-2026-02-01",
+    ])].join(",");
   }
 
   return headers;
@@ -166,8 +185,10 @@ export function streamAnthropicOAuth(
   model: Model<Api>,
   context: TranscriptContext,
   options?: SimpleStreamOptions,
+  fastModeEnabled = false,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
+  const fastMode = fastModeEnabled && supportsFastMode(model);
 
   // Anthropic has no mid-conversation system messages: fold system-message
   // patches into the leading system message, then read the current prompt and
@@ -205,7 +226,7 @@ export function streamAnthropicOAuth(
       }
 
       const isOAuth = isClaudeOAuthAccessToken(apiKey);
-      const defaultHeaders = makeDefaultHeaders(isOAuth, options);
+      const defaultHeaders = makeDefaultHeaders(isOAuth, options, fastMode);
 
       if (isOAuth) defaultHeaders.authorization = `Bearer ${apiKey}`;
 
@@ -235,6 +256,7 @@ export function streamAnthropicOAuth(
         max_tokens: maxTokens,
         stream: true,
       };
+      if (fastMode) Object.assign(params, { speed: "fast" });
 
       const system = buildAnthropicSystemPrompt(systemPrompt, isOAuth, cacheRetention);
       if (system) params.system = system as never;
@@ -280,7 +302,7 @@ export function streamAnthropicOAuth(
       // mid-flight) and aborts the turn. The raw stream yields the same
       // RawMessageStreamEvents; tool args are already parsed leniently below.
       const { data: anthropicStream, response: httpResponse } =
-        await client.messages
+        await client.beta.messages
           .create(params, {
             signal: options?.signal,
           })
