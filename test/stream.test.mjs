@@ -187,11 +187,13 @@ test("refusal stop reasons surface the provider explanation", () => {
   );
 });
 
-for (const retryHeaders of [
-  { "retry-after": "18000" },
-  { "retry-after-ms": "18000000" },
+for (const [retryHeaders, fastMode] of [
+  [{ "retry-after": "18000" }, false],
+  [{ "retry-after-ms": "18000000" }, false],
+  [{ "retry-after": "18000" }, true],
+  [{ "retry-after-ms": "18000000" }, true],
 ]) {
-  test(`quota errors surface without hidden SDK waits (${Object.keys(retryHeaders)[0]})`, async (t) => {
+  test(`quota errors surface without hidden SDK waits (${Object.keys(retryHeaders)[0]}, fast=${fastMode})`, async (t) => {
     let requests = 0;
     const hiddenDelays = [];
     const setTimeout = globalThis.setTimeout;
@@ -203,7 +205,9 @@ for (const retryHeaders of [
       }
       return setTimeout(callback, delay, ...args);
     });
-    t.mock.method(globalThis, "fetch", async () => {
+    t.mock.method(globalThis, "fetch", async (url, init) => {
+      assert.equal(String(url), "https://api.anthropic.com/v1/messages?beta=true");
+      assert.equal(JSON.parse(init.body).speed, fastMode ? "fast" : undefined);
       requests++;
       return new Response(
         JSON.stringify({
@@ -222,11 +226,12 @@ for (const retryHeaders of [
 
     const events = [];
     const stream = streamAnthropicOAuth(
-      model,
+      { ...model, id: "claude-opus-5" },
       normalizeContext({
         messages: [{ role: "user", content: "hello", timestamp: 0 }],
       }),
       { apiKey: "sk-ant-oat01-test" },
+      fastMode,
     );
     for await (const event of stream) events.push(event);
 
