@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
+import timers from "node:timers/promises";
 import {
   loginAnthropic,
   refreshAnthropicToken,
@@ -229,13 +230,12 @@ test("wrong-state callback returns 400 and a later valid callback completes logi
 
 test("parses numeric and HTTP-date Retry-After values and caps delays", { concurrency: false }, async () => {
   const originalFetch = globalThis.fetch;
-  const originalSetTimeout = globalThis.setTimeout;
+  const originalSetTimeout = timers.setTimeout;
   const delays = [];
   let attempt = 0;
 
-  globalThis.setTimeout = (callback, delay, ...args) => {
+  timers.setTimeout = async (delay) => {
     delays.push(delay);
-    return originalSetTimeout(callback, 0, ...args);
   };
   globalThis.fetch = async () => {
     attempt += 1;
@@ -259,7 +259,7 @@ test("parses numeric and HTTP-date Retry-After values and caps delays", { concur
     assert.deepEqual(delays, [1250, 30_000]);
   } finally {
     globalThis.fetch = originalFetch;
-    globalThis.setTimeout = originalSetTimeout;
+    timers.setTimeout = originalSetTimeout;
   }
 });
 
@@ -284,7 +284,9 @@ test("refresh grace applies to network, 429, and 5xx failures but not permanent 
       const refreshed = await refreshAnthropicToken(futureCredentials);
       assert.equal(refreshed.access, futureCredentials.access);
       assert.equal(refreshed.refresh, futureCredentials.refresh);
-      assert.ok(refreshed.expires > Date.now());
+      assert.equal(refreshed.expires, futureCredentials.expires);
+      assert.ok(refreshed.refreshRetryAt > Date.now());
+      assert.ok(refreshed.refreshRetryAt <= futureCredentials.expires);
     }
 
     globalThis.fetch = async () => {

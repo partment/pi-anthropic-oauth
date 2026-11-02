@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import timers from "node:timers/promises";
 import type {
   OAuthCredentials,
   OAuthLoginCallbacks,
@@ -24,6 +25,7 @@ const LOCAL_CALLBACK_TIMEOUT = 5 * 60 * 1000;
 const MAX_TOKEN_RETRIES = 2;
 const INITIAL_RETRY_DELAY_MS = 5000;
 const MAX_RETRY_DELAY_MS = 30_000;
+const REFRESH_COOLDOWN_MS = 30_000;
 const MANUAL_SETTLE_GRACE_MS = 10_000;
 const LOCAL_REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
 
@@ -194,7 +196,19 @@ export async function loginAnthropic(
 
 export async function refreshAnthropicToken(
   credentials: OAuthCredentials,
+  signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
+  signal?.throwIfAborted();
+  const now = Date.now();
+  // Pi refreshes early, so expires must remain the credential deadline, not a retry timer.
+  if (
+    credentials.expires > now &&
+    typeof credentials.refreshRetryAt === "number" &&
+    credentials.refreshRetryAt > now
+  ) {
+    return credentials;
+  }
+
   let response: Response;
   try {
     response = await fetchWithRetry(
@@ -202,6 +216,7 @@ export async function refreshAnthropicToken(
       {
         method: "POST",
         headers: makeTokenHeaders(),
+        signal,
         body: JSON.stringify({
           grant_type: "refresh_token",
           client_id: CLIENT_ID,
@@ -211,8 +226,14 @@ export async function refreshAnthropicToken(
       "Token refresh",
     );
   } catch (error) {
-    if (isTransientTokenError(error) && credentials.expires > Date.now()) {
-      return { ...credentials, expires: Date.now() + 30_000 };
+    signal?.throwIfAborted();
+    const now = Date.now();
+    if (isTransientTokenError(error) && credentials.expires > now) {
+      // Pi persists this under its existing lock, sharing the cooldown across processes.
+      return {
+        ...credentials,
+        refreshRetryAt: Math.min(now + REFRESH_COOLDOWN_MS, credentials.expires),
+      };
     }
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Token refresh failed: ${detail}`);
@@ -258,6 +279,7 @@ async function fetchWithRetry(
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= MAX_TOKEN_RETRIES; attempt++) {
+    init.signal?.throwIfAborted();
     const response = await fetch(url, init);
 
     if (response.ok) return response;
@@ -281,7 +303,7 @@ async function fetchWithRetry(
         parseRetryAfter(response.headers.get("retry-after")) ??
         INITIAL_RETRY_DELAY_MS * 2 ** attempt;
 
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await timers.setTimeout(delayMs, undefined, { signal: init.signal ?? undefined });
       lastError = failure;
       continue;
     }
