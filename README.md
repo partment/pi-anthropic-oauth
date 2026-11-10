@@ -61,6 +61,18 @@ pi update npm:pi-anthropic-oauth
 
 Creates `~/.Claude Code` → `~/.pi` if missing.
 
+## Request handling
+
+Requests include client and session metadata. Model capabilities determine beta headers, thinking settings, output limits, and cache placement. Tool-result follow-ups retain the prompt ID and link to the preceding response.
+
+When thinking is enabled, requests use `display: "summarized"` so Pi can show the returned thinking summary. The API still determines whether a response contains one.
+
+System updates are folded into the current top-level prompt before each request. The conversation sent to Anthropic contains no inline system messages. The cache marker goes on the last user or tool-result block. If system instructions change, the cached prefix may need to be rebuilt.
+
+Pi supplies the system instructions, permissions, and tools. Tool names keep their existing mapping; descriptions, JSON Schemas, inputs, and results stay Pi-native. The billing system block retains `cch=00000` as a placeholder; the checksum is not computed.
+
+See [request fixtures and local capture](test/fixtures/README.md) for the tested behaviors, normalization rules, and capture command. Tests use local responses and dummy credentials rather than real inference.
+
 ## Fast Mode
 
 Run `/fast` to toggle Fast Mode, or use `/fast on` / `/fast off`. It defaults to off and is kept in memory only; restarting Pi or running `/reload` resets it.
@@ -73,7 +85,7 @@ Fast Mode only applies to the `anthropic` provider with these [officially suppor
 
 Switching to another model leaves it at standard speed. Switching back to a supported model reuses the toggle. The footer shows `Fast Mode` when it applies to the selected model. The command does not switch models.
 
-Both regular and Fast Mode requests use `/v1/messages?beta=true`, matching Claude Code's request path.
+Both regular and Fast Mode requests use `/v1/messages?beta=true`.
 
 Enabled requests include `speed: "fast"` and the `fast-mode-2026-02-01` beta header, alongside the existing OAuth headers. Disabled or unsupported requests omit both Fast Mode additions. Thinking settings are unchanged.
 
@@ -85,12 +97,12 @@ Enabled requests include `speed: "fast"` and the `fast-mode-2026-02-01` beta hea
 Anthropic gates new models on the Claude Code client version (error `claude_code_version_too_old`). The version is sent in both the OAuth user agent and the billing header of the system prompt. Override it without reinstalling:
 
 ```bash
-PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION=2.1.280
+PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION="<client-version>"
 ```
 
 ## Prompt cache retention
 
-Cache breakpoints follow pi's `cacheRetention` setting: `short` (default) uses the 5-minute cache, `long` uses the 1-hour cache, and `none` disables caching. Without an explicit setting, `PI_CACHE_RETENTION` is honored, same as pi's built-in Anthropic provider:
+OAuth requests default to the 1-hour cache. API-key requests default to the 5-minute cache. An explicit Pi `cacheRetention` option takes priority, followed by `PI_CACHE_RETENTION`: `long` selects 1 hour, `short` selects 5 minutes, and `none` disables caching. For example:
 
 ```bash
 PI_CACHE_RETENTION=long
@@ -98,7 +110,7 @@ PI_CACHE_RETENTION=long
 
 ## System prompt rewriting
 
-When using Claude Pro/Max OAuth, the extension prepends the Claude Code billing-header and identity system blocks and rewrites standalone `Pi` / `pi` references in Pi's system prompt to `Claude Code`. The rewrite mode defaults to `aggressive`:
+For both OAuth and API-key inference, the extension prepends the Claude Code billing-header and identity system blocks and rewrites standalone `Pi` / `pi` references in Pi's system prompt to `Claude Code`. The rewrite mode defaults to `aggressive`:
 
 ```bash
 PI_ANTHROPIC_OAUTH_REWRITE_MODE=aggressive

@@ -1,22 +1,40 @@
 import type { CacheControlEphemeral } from "@anthropic-ai/sdk/resources/messages.js";
 import type { CacheRetention, ProviderEnv } from "@earendil-works/pi-ai";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { getClaudeCodeVersion } from "./version.js";
 
 const CLAUDE_CODE_IDENTITY =
   "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
-/**
- * Anthropic's OAuth classifier rejects premium-model requests that do not
- * open with a Claude Code billing-header system block. The `cch` and
- * `cc_prompt_id` keys must be present, but their values are not validated,
- * and the block must not carry `cache_control`.
- */
-export function buildClaudeCodeBillingBlock(): MessageContentBlock {
-  return {
-    type: "text",
-    text: `x-anthropic-billing-header: cc_version=${getClaudeCodeVersion()}; cc_entrypoint=cli; cch=00000; cc_prompt_id=${randomUUID()}`,
-  };
+export interface ClaudeCodeAttribution {
+  promptId: string;
+  promptIndex: number;
+  turnIndex: number;
+  previousRequestId?: string;
+}
+
+// The version suffix samples the first user prompt, not the system prompt
+// or the current tool result.
+export function buildClaudeCodeBillingBlock(
+  firstUserText = "",
+  attribution?: ClaudeCodeAttribution,
+): MessageContentBlock {
+  const version = getClaudeCodeVersion();
+  const suffix = createHash("sha256")
+    .update(`59cf53e54c78${firstUserText[4] ?? "0"}${firstUserText[7] ?? "0"}${firstUserText[20] ?? "0"}${version}`)
+    .digest("hex").slice(0, 3);
+  let text = `x-anthropic-billing-header: cc_version=${version}.${suffix}; cc_entrypoint=sdk-cli;`;
+  if (attribution) {
+    // Keep the native pre-checksum placeholder and the existing OAuth field.
+    // The native replacement checksum is not reproduced for Pi's prompt.
+    text += " cch=00000;";
+    if (attribution.previousRequestId && /^req_[A-Za-z0-9_-]{1,36}$/.test(attribution.previousRequestId)) {
+      text += ` cc_prev_req=${attribution.previousRequestId};`;
+    }
+    text += ` cc_prompt_id=${attribution.promptId}; cc_turn_origin=sdk;`;
+    text += ` cc_prompt_index=${attribution.promptIndex}; cc_turn_index=${attribution.turnIndex};`;
+  }
+  return { type: "text", text };
 }
 const PI_REMOVAL_ANCHORS = [
   "pi-coding-agent",
@@ -44,9 +62,9 @@ const PI_REWRITE_MODES = new Set<PiRewriteMode>([
 ]);
 
 type MessageContentBlock = {
-  type: string;
-  text?: string;
-  [key: string]: unknown;
+  type: "text";
+  text: string;
+  cache_control?: CacheControlEphemeral;
 };
 
 export function sanitizeSurrogates(text: string): string {
@@ -64,10 +82,12 @@ export function sanitizeSurrogates(text: string): string {
 export function resolveCacheRetention(
   cacheRetention: CacheRetention | undefined,
   env?: ProviderEnv,
+  defaultRetention: CacheRetention = "short",
 ): CacheRetention {
   if (cacheRetention) return cacheRetention;
   const envValue = env?.PI_CACHE_RETENTION ?? process.env.PI_CACHE_RETENTION;
-  return envValue === "long" ? "long" : "short";
+  return envValue === "long" || envValue === "short" || envValue === "none"
+    ? envValue : defaultRetention;
 }
 
 export function cacheControlFor(
@@ -82,12 +102,18 @@ export function buildAnthropicSystemPrompt(
   systemPrompt: string | undefined,
   isOAuth: boolean,
   cacheRetention: CacheRetention = "short",
+  firstUserText = "",
+  attribution?: ClaudeCodeAttribution,
 ): MessageContentBlock[] | undefined {
   const blocks: MessageContentBlock[] = [];
 
   if (isOAuth) {
-    blocks.push(buildClaudeCodeBillingBlock());
-    blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY });
+    blocks.push(buildClaudeCodeBillingBlock(firstUserText, attribution));
+    const cacheControl = cacheControlFor(cacheRetention);
+    blocks.push({
+      type: "text", text: CLAUDE_CODE_IDENTITY,
+      ...(cacheControl && { cache_control: cacheControl }),
+    });
   }
 
   const sanitized = systemPrompt

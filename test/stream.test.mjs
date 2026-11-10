@@ -145,7 +145,7 @@ test("one-token replays still skip budget thinking on legacy models", async (t) 
     maxTokens: 1,
   });
 
-  assert.equal(replay.thinking, undefined);
+  assert.deepEqual(replay.thinking, { type: "disabled" });
 });
 
 test("message deltas accept explicit zeroes and terminal stop reasons", () => {

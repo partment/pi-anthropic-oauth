@@ -1,5 +1,5 @@
 export const CLAUDE_CODE_VERSION_ENV = "PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION";
-const DEFAULT_CLAUDE_CODE_VERSION = "2.1.280";
+const DEFAULT_CLAUDE_CODE_VERSION = "2.1.290";
 
 /**
  * Claude Code version advertised to the API (user agent and billing header).
@@ -14,11 +14,10 @@ export function getClaudeCodeVersion(
 }
 
 /**
- * User agent matching the current Claude Code CLI client. The classifier
- * rejects the older `claude-code/<ver>` form for premium models.
+ * Builds the CLI user agent using the configured client version.
  */
 export function makeClaudeCodeUserAgent(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return `claude-cli/${getClaudeCodeVersion(env)} (external, cli)`;
+  return `claude-cli/${getClaudeCodeVersion(env)} (external, sdk-cli)`;
 }

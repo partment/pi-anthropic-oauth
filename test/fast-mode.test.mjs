@@ -101,12 +101,11 @@ test("Fast Mode adds only speed and its beta to OAuth and API-key requests", asy
         }
       }
       const [before, fast, after] = requests.slice(-3);
-      // OAuth billing uses a fresh prompt ID on every request, regardless of speed.
-      for (const { body } of [before, fast, after]) {
-        if (body.system) {
-          body.system[0].text = body.system[0].text.replace(/cc_prompt_id=[0-9a-f-]+$/, "cc_prompt_id=<request>");
-        }
-      }
+      // A prompt spans tool/API iterations; only the per-request ID changes.
+      assert.equal(after.headers.get("x-claude-code-prompt-id"), before.headers.get("x-claude-code-prompt-id"));
+      assert.notEqual(after.headers.get("x-client-request-id"), before.headers.get("x-client-request-id"));
+      after.headers.delete("x-client-request-id");
+      before.headers.delete("x-client-request-id");
       const { speed, ...fastBody } = fast.body;
       assert.deepEqual(fastBody, before.body);
       assert.deepEqual(after.body, before.body);
@@ -173,6 +172,9 @@ test("Fast Mode preserves cache retention, tools, and empty-text filtering", asy
       assert.equal(body.messages[0].content.length, 1);
       assert.equal(body.messages[0].content[0].text, "Read a file.");
       assert.deepEqual(body.messages[0].content[0].cache_control, cacheControl);
+      const tail = body.messages.at(-1);
+      assert.equal(tail.role, "user");
+      assert.deepEqual(Array.isArray(tail.content) ? tail.content.at(-1).cache_control : undefined, cacheControl);
       assert.deepEqual(body.system.at(-1).cache_control, cacheControl);
     }
   }
@@ -279,4 +281,43 @@ test("/fast toggles provider requests, survives model switches, and resets on re
   await extension.commands.fast.handler("off", ctx);
   ctx.model = model;
   await send(false);
+});
+
+test("tool durations use wire names, reset after sending, and never leak between providers or sessions", async (t) => {
+  const requests = captureRequests(t);
+  const extension = loadExtension(t);
+  const ctx = { model, ui: { setStatus() {} } };
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const record = (name = "read", id = "tool-1") => {
+    extension.events.tool_execution_start({ toolCallId: id, toolName: name }, ctx);
+    now += 8.4;
+    extension.events.tool_execution_end({ toolCallId: id, toolName: name }, ctx);
+  };
+  const send = async (opts = options) => {
+    const result = await extension.provider.streamSimple(model, context, opts).result();
+    assert.equal(result.stopReason, "stop", result.errorMessage);
+    return requests.at(-1).headers.get("x-claude-code-prev-tool-durations");
+  };
+  record();
+  record("my-tool", "tool-2");
+  assert.equal(await send(), "Read=8;mcp__pi__my-tool=8");
+  assert.equal(await send(), null);
+  record("a;b=c,d e%字");
+  assert.equal(await send({ ...options, apiKey: "sk-ant-api-test" }), "a%3Bb%3Dc%2Cd%20e%25%E5%AD%97=8");
+  for (let i = 0; i < 40; i++) record();
+  assert.equal((await send()).split(";").length, 32);
+  record("x".repeat(4090));
+  record();
+  assert.ok((await send({ ...options, apiKey: "sk-ant-api-test" })).length <= 4096);
+  record();
+  extension.events.session_start({}, ctx);
+  assert.equal(await send(), null);
+  record();
+  ctx.model = { ...model, provider: "openrouter" };
+  extension.events.model_select({}, ctx);
+  record();
+  ctx.model = model;
+  extension.events.model_select({}, ctx);
+  assert.equal(await send(), null);
 });

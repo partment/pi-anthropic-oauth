@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import timers from "node:timers/promises";
 import type {
@@ -30,6 +31,25 @@ const MANUAL_SETTLE_GRACE_MS = 10_000;
 const LOCAL_REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
 
 export { USER_AGENT };
+
+// Persisted with OAuth credentials on login/refresh. Imported older credentials
+// use a process-stable ID until the next successful refresh migrates them.
+const fallbackDeviceId = randomBytes(32).toString("hex");
+let activeCredentials: OAuthCredentials | undefined;
+
+export function getAnthropicApiKey(credentials: OAuthCredentials): string {
+  activeCredentials = credentials;
+  return credentials.access;
+}
+
+export function getAnthropicUserId(apiKey: string, sessionId: string): string {
+  const credentials = activeCredentials?.access === apiKey ? activeCredentials : undefined;
+  return JSON.stringify({
+    device_id: typeof credentials?.deviceId === "string" ? credentials.deviceId : fallbackDeviceId,
+    account_uuid: typeof credentials?.accountUuid === "string" ? credentials.accountUuid : "",
+    session_id: sessionId,
+  });
+}
 
 class TokenHttpError extends Error {
   constructor(
@@ -185,12 +205,15 @@ export async function loginAnthropic(
     access_token: string;
     refresh_token: string;
     expires_in: number;
+    account?: { uuid?: string };
   };
 
   return {
     access: data.access_token,
     refresh: data.refresh_token,
     expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
+    deviceId: fallbackDeviceId,
+    accountUuid: data.account?.uuid ?? "",
   };
 }
 
@@ -243,12 +266,15 @@ export async function refreshAnthropicToken(
     access_token: string;
     refresh_token: string;
     expires_in: number;
+    account?: { uuid?: string };
   };
 
   return {
     access: data.access_token,
     refresh: data.refresh_token || credentials.refresh,
     expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
+    deviceId: typeof credentials.deviceId === "string" ? credentials.deviceId : fallbackDeviceId,
+    accountUuid: data.account?.uuid ?? (typeof credentials.accountUuid === "string" ? credentials.accountUuid : ""),
   };
 }
 

@@ -1,10 +1,5 @@
-import type {
-  CacheControlEphemeral,
-  ContentBlockParam,
-  MessageParam,
-  ToolUnion,
-} from "@anthropic-ai/sdk/resources/messages.js";
-
+import type { CacheControlEphemeral, ToolUnion } from "@anthropic-ai/sdk/resources/messages.js";
+import type { BetaContentBlockParam, BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 type ToolResultContentBlock =
   | { type: "text"; text: string }
   | {
@@ -25,7 +20,6 @@ import type {
   ThinkingContent,
   Tool,
   ToolCall,
-  ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { cacheControlFor, sanitizeSurrogates } from "./prompt.js";
 
@@ -79,8 +73,8 @@ export function convertPiMessagesToAnthropic(
   isOAuth: boolean,
   model: Pick<Model<Api>, "provider" | "api" | "id">,
   cacheRetention: CacheRetention = "short",
-): MessageParam[] {
-  const params: MessageParam[] = [];
+): BetaMessageParam[] {
+  const params: BetaMessageParam[] = [];
   const toolIdMap = new Map<string, string>();
   const usedToolIds = new Set<string>();
 
@@ -112,7 +106,7 @@ export function convertPiMessagesToAnthropic(
 
   const flushPendingToolResults = () => {
     if (pendingToolUseIds.length === 0) return;
-    const syntheticBlocks: ContentBlockParam[] = pendingToolUseIds.map((id) => ({
+    const syntheticBlocks: BetaContentBlockParam[] = pendingToolUseIds.map((id) => ({
       type: "tool_result",
       tool_use_id: id,
       content: "No result provided",
@@ -134,7 +128,7 @@ export function convertPiMessagesToAnthropic(
         // display-only message whose data lives in `details`). Anthropic
         // rejects empty text blocks, and a cache breakpoint on one fails with
         // "cache_control cannot be set for empty text blocks".
-        const blocks: ContentBlockParam[] = message.content
+        const blocks: BetaContentBlockParam[] = message.content
           .filter((item) => item.type !== "text" || item.text.trim())
           .map((item) =>
             item.type === "text"
@@ -162,7 +156,7 @@ export function convertPiMessagesToAnthropic(
       // patch them up before emitting the new assistant turn.
       flushPendingToolResults();
 
-      const blocks: ContentBlockParam[] = [];
+      const blocks: BetaContentBlockParam[] = [];
       const emittedToolUseIds: string[] = [];
       const isSameModel =
         message.provider === model.provider &&
@@ -211,7 +205,7 @@ export function convertPiMessagesToAnthropic(
     }
 
     if (message.role === "toolResult") {
-      const toolResults: ContentBlockParam[] = [];
+      const toolResults: BetaContentBlockParam[] = [];
       const satisfiedIds = new Set<string>();
 
       const firstId = getAnthropicToolId(message.toolCallId);
@@ -219,19 +213,20 @@ export function convertPiMessagesToAnthropic(
         type: "tool_result",
         tool_use_id: firstId,
         content: convertToolResultContentToAnthropic(message.content),
-        is_error: message.isError,
+        ...(message.isError && { is_error: true }),
       });
       satisfiedIds.add(firstId);
 
       let j = i + 1;
-      while (j < messages.length && messages[j]?.role === "toolResult") {
-        const nextMessage = messages[j] as ToolResultMessage;
+      while (j < messages.length) {
+        const nextMessage = messages[j];
+        if (nextMessage.role !== "toolResult") break;
         const nextId = getAnthropicToolId(nextMessage.toolCallId);
         toolResults.push({
           type: "tool_result",
           tool_use_id: nextId,
           content: convertToolResultContentToAnthropic(nextMessage.content),
-          is_error: nextMessage.isError,
+          ...(nextMessage.isError && { is_error: true }),
         });
         satisfiedIds.add(nextId);
         j++;
@@ -262,7 +257,7 @@ export function convertPiMessagesToAnthropic(
   // so a history ending on an unresolved tool call is still valid.
   flushPendingToolResults();
 
-  // Anthropic prompt caching requires an explicit breakpoint. Plain-text user
+  // Anthropic prompt caching requires an explicit breakpoint. Plain-text
   // turns must be promoted to a block so there is somewhere to attach it.
   const cacheControl = cacheControlFor(cacheRetention);
   const last = params.at(-1);
@@ -293,9 +288,8 @@ export function convertPiToolsToAnthropic(tools: Tool[], isOAuth: boolean): Tool
     name: isOAuth ? toClaudeCodeToolName(tool.name) : tool.name,
     description: tool.description,
     input_schema: {
+      ...tool.parameters,
       type: "object" as const,
-      properties: (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {},
-      required: (tool.parameters as { required?: string[] }).required ?? [],
     },
   }));
 }

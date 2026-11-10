@@ -1,13 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/messages.js";
 import {
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
   calculateCost,
-  collapseSystemMessages,
   createAssistantMessageEventStream,
-  getCurrentSystemPrompt,
   getCurrentTools,
   type JsonObject,
   type Model,
@@ -15,52 +12,10 @@ import {
   type StopReason,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { isClaudeOAuthAccessToken, USER_AGENT } from "./auth.js";
-import {
-  convertPiMessagesToAnthropic,
-  convertPiToolsToAnthropic,
-  fromClaudeCodeToolName,
-  type IndexedBlock,
-} from "./convert.js";
-import { buildAnthropicSystemPrompt, resolveCacheRetention } from "./prompt.js";
-
-const REQUIRED_BETAS = [
-  "claude-code-20250219",
-  "oauth-2025-04-20",
-  // fine-grained-tool-streaming removed: it ships the model's raw, unvalidated
-  // tool-input JSON. For large edits full of quotes/newlines the streamed
-  // string escaping breaks, so a field (e.g. edit.oldText) swallows the rest of
-  // the structure — surfacing as either a hard JSON.parse crash or a wrong-shape
-  // schema-validation failure. Default streaming has the server validate/buffer
-  // tool JSON, guaranteeing well-formed, correctly-structured input.
-  "interleaved-thinking-2025-05-14",
-] as const;
-
-const LEGACY_THINKING_MODEL =
-  /^claude-(?:opus|sonnet|haiku)-4-[0-5](?:-|$)|^claude-[0-3][-.]/;
-const MIN_THINKING_BUDGET = 1024;
-const EFFORT_BY_REASONING: Record<string, string> = {
-  minimal: "low",
-  low: "low",
-  medium: "medium",
-  high: "high",
-  xhigh: "xhigh",
-  max: "max",
-};
-
-// https://platform.claude.com/docs/en/build-with-claude/fast-mode#supported-models
-export function supportsFastMode(model?: Model<Api>): boolean {
-  return model?.provider === "anthropic" &&
-    ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"].includes(model.id);
-}
-
-export function usesAdaptiveThinking(model: Model<Api>): boolean {
-  const forced = (
-    model.compat as { forceAdaptiveThinking?: boolean } | undefined
-  )?.forceAdaptiveThinking;
-  if (typeof forced === "boolean") return forced;
-  return !LEGACY_THINKING_MODEL.test(model.id.toLowerCase().replace(/\./g, "-"));
-}
+import { isClaudeOAuthAccessToken } from "./auth.js";
+import { fromClaudeCodeToolName, type IndexedBlock } from "./convert.js";
+import { buildClaudeCodeRequest } from "./request.js";
+export { supportsFastMode, usesAdaptiveThinking } from "./request.js";
 
 function mapStopReason(reason: string | null | undefined): StopReason {
   switch (reason) {
@@ -131,56 +86,6 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return record;
 }
 
-function makeDefaultHeaders(
-  isOAuth: boolean,
-  options?: SimpleStreamOptions,
-  fastMode = false,
-): Record<string, string> {
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    "anthropic-dangerous-direct-browser-access": "true",
-  };
-
-  if (isOAuth) {
-    headers["anthropic-beta"] = REQUIRED_BETAS.join(",");
-    headers["user-agent"] = USER_AGENT;
-    headers["x-app"] = "cli";
-  } else {
-    headers["anthropic-beta"] = ["interleaved-thinking-2025-05-14"].join(",");
-  }
-
-  if (options?.headers) {
-    for (const [key, value] of Object.entries(options.headers)) {
-      const normalizedKey = key.toLowerCase();
-      if (
-        isOAuth &&
-        (normalizedKey === "x-api-key" || normalizedKey === "authorization")
-      ) {
-        continue;
-      }
-      // Keep required betas when adding caller-supplied Fast Mode headers.
-      if (fastMode && normalizedKey === "anthropic-beta") {
-        if (value) headers["anthropic-beta"] += `,${value}`;
-        continue;
-      }
-      const existingKey = Object.keys(headers).find(
-        (header) => header.toLowerCase() === normalizedKey,
-      );
-      if (existingKey) delete headers[existingKey];
-      if (value !== null) headers[key] = value;
-    }
-  }
-
-  if (fastMode) {
-    headers["anthropic-beta"] = [...new Set([
-      ...headers["anthropic-beta"].split(",").map((beta) => beta.trim()).filter(Boolean),
-      "fast-mode-2026-02-01",
-    ])].join(",");
-  }
-
-  return headers;
-}
-
 export function streamAnthropicOAuth(
   model: Model<Api>,
   context: TranscriptContext,
@@ -188,15 +93,7 @@ export function streamAnthropicOAuth(
   fastModeEnabled = false,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
-  const fastMode = fastModeEnabled && supportsFastMode(model);
-
-  // Anthropic has no mid-conversation system messages: fold system-message
-  // patches into the leading system message, then read the current prompt and
-  // tool declarations from the transcript (pi >= 0.86 no longer provides
-  // context.systemPrompt / context.tools).
-  const transcript = collapseSystemMessages(context);
-  const tools = getCurrentTools(transcript.messages);
-  const systemPrompt = getCurrentSystemPrompt(transcript.messages);
+  const tools = getCurrentTools(context.messages);
 
   void (async () => {
     const output: AssistantMessage = {
@@ -226,82 +123,15 @@ export function streamAnthropicOAuth(
       }
 
       const isOAuth = isClaudeOAuthAccessToken(apiKey);
-      const defaultHeaders = makeDefaultHeaders(isOAuth, options, fastMode);
-
-      if (isOAuth) defaultHeaders.authorization = `Bearer ${apiKey}`;
-
+      const { params, headers, session } = buildClaudeCodeRequest(model, context, options ?? {}, fastModeEnabled);
       const client = new Anthropic({
         baseURL: model.baseUrl,
         apiKey: isOAuth ? null : apiKey,
         authToken: isOAuth ? apiKey : null,
-        defaultHeaders,
+        defaultHeaders: headers,
         dangerouslyAllowBrowser: true,
+        ...(options?.timeoutMs !== undefined && { timeout: options.timeoutMs }),
       });
-
-      const maxTokens =
-        options?.maxTokens || Math.floor(model.maxTokens / 3);
-      const cacheRetention = resolveCacheRetention(
-        options?.cacheRetention,
-        options?.env,
-      );
-
-      const params: MessageCreateParamsStreaming = {
-        model: model.id,
-        messages: convertPiMessagesToAnthropic(
-          transcript.messages,
-          isOAuth,
-          model,
-          cacheRetention,
-        ),
-        max_tokens: maxTokens,
-        stream: true,
-      };
-      if (fastMode) Object.assign(params, { speed: "fast" });
-
-      const system = buildAnthropicSystemPrompt(systemPrompt, isOAuth, cacheRetention);
-      if (system) params.system = system as never;
-      if (tools.length)
-        params.tools = convertPiToolsToAnthropic(tools, isOAuth);
-
-      // Cache warming replays the request with maxTokens: 1. Adaptive thinking has
-      // no budget to fit under it, so keep it on: dropping it changes the request
-      // and the replay misses the cached messages it is meant to keep warm.
-      if (
-        options?.reasoning &&
-        model.reasoning &&
-        (maxTokens > 1 || usesAdaptiveThinking(model))
-      ) {
-        const defaultBudgets: Record<string, number> = {
-          minimal: 1024,
-          low: 4096,
-          medium: 10240,
-          high: 20480,
-          xhigh: 32000,
-        };
-        const customBudget =
-          options.thinkingBudgets?.[
-            options.reasoning as keyof typeof options.thinkingBudgets
-          ];
-        const requestedBudget =
-          customBudget ?? defaultBudgets[options.reasoning] ?? 10240;
-        if (usesAdaptiveThinking(model)) {
-          const mapped = model.thinkingLevelMap?.[options.reasoning];
-          const effort =
-            typeof mapped === "string"
-              ? mapped
-              : (EFFORT_BY_REASONING[options.reasoning] ?? "high");
-          params.thinking = {
-            type: "adaptive",
-            display: "summarized",
-          } as never;
-          Object.assign(params, { output_config: { effort } });
-        } else {
-          const budget = Math.min(requestedBudget, maxTokens - 1);
-          if (budget >= MIN_THINKING_BUDGET) {
-            params.thinking = { type: "enabled", budget_tokens: budget };
-          }
-        }
-      }
 
       // Raw stream instead of the MessageStream helper: MessageStream
       // accumulates tool_use input and JSON.parses it on content_block_stop,
@@ -316,6 +146,7 @@ export function streamAnthropicOAuth(
             maxRetries: 0,
           })
           .withResponse();
+      session.previousRequestId = httpResponse.headers.get("request-id") ?? undefined;
 
       if (options?.onResponse) {
         try {
@@ -341,6 +172,7 @@ export function streamAnthropicOAuth(
           lastEvent = event.type;
 
           if (event.type === "message_start") {
+            output.responseId = event.message.id;
             output.usage.input = event.message.usage.input_tokens || 0;
             output.usage.output = event.message.usage.output_tokens || 0;
             output.usage.cacheRead =

@@ -8,6 +8,7 @@ import {
   sanitizeSurrogates,
   sanitizeSystemText,
 } from "../.test-dist/prompt.js";
+import { getClaudeCodeVersion } from "../.test-dist/version.js";
 
 test("OAuth system prompt opens with a Claude Code billing block", () => {
   const blocks = buildAnthropicSystemPrompt("You are a coding agent.", true);
@@ -17,12 +18,9 @@ test("OAuth system prompt opens with a Claude Code billing block", () => {
   assert.equal(billing.type, "text");
   assert.match(billing.text, /^x-anthropic-billing-header: /);
   assert.match(billing.text, /cc_version=/);
-  assert.match(billing.text, /cc_entrypoint=cli/);
-  assert.match(billing.text, /cch=/);
-  assert.match(
-    billing.text,
-    /cc_prompt_id=[0-9a-f-]{36}$/,
-  );
+  assert.ok(billing.text.includes(`cc_version=${getClaudeCodeVersion()}.`));
+  assert.match(billing.text, /\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;$/);
+  assert.doesNotMatch(billing.text, /cch=00000/);
   assert.equal(billing.cache_control, undefined);
 });
 
@@ -35,7 +33,7 @@ test("OAuth identity block uses the current Claude Code wording", () => {
     identity.text,
     "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
   );
-  assert.equal(identity.cache_control, undefined);
+  assert.deepEqual(identity.cache_control, { type: "ephemeral" });
 });
 
 test("sanitized system prompt keeps its cache_control marker", () => {
